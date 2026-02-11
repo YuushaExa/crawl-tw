@@ -9,6 +9,79 @@ const { default: PQueue } = require('p-queue');
 const writeFile = promisify(fs.writeFile);
 const mkdir = promisify(fs.mkdir);
 
+// Helper: Resolve relative URL to absolute
+function resolveUrl(relative, base) {
+    try {
+        return relative ? new URL(relative, base).href : '';
+    } catch (e) {
+        return relative || '';
+    }
+}
+
+// Fetch all pages of author's works (handles pagination)
+async function fetchAuthorWorks(axiosInstance, authorUrl, baseUrl, currentNovelId) {
+    const allWorks = [];
+    let currentPage = 1;
+    const maxPages = 5; // Safety limit to prevent infinite loops
+
+    while (currentPage <= maxPages) {
+        try {
+            const pageUrl = currentPage === 1 
+                ? authorUrl 
+                : `${authorUrl}?page=${currentPage}`;
+            
+            const response = await axiosInstance.get(pageUrl);
+            const $ = cheerio.load(response.data);
+            let foundItems = false;
+
+            // Process each novel item
+            $('li.burl').each((_, el) => {
+                foundItems = true;
+                const $item = $(el);
+                
+                // Get novel URL (prioritize image link)
+                let novelPath = $item.find('div.l-img a').attr('href') || 
+                               $item.find('h3.bname a').attr('href');
+                
+                if (!novelPath || !novelPath.startsWith('/read/')) return;
+                
+                // Skip current novel
+                const idMatch = novelPath.match(/\/read\/(\d+)\//);
+                if (!idMatch || idMatch[1] === currentNovelId) return;
+                
+                // Extract data
+                const title = $item.find('h3.bname a').text().trim() || 'Untitled';
+                const imgSrc = $item.find('div.l-img img').attr('src') || '';
+                const description = $item.find('p.l-p2').text().trim() || '';
+                
+                allWorks.push({
+                    title,
+                    image: resolveUrl(imgSrc, baseUrl),
+                    description,
+                    url: resolveUrl(novelPath, baseUrl)
+                });
+            });
+
+            // Stop if no items found (end of pagination)
+            if (!foundItems) break;
+            
+            // Check for next page (look for pagination controls)
+            const hasNextPage = $('.pager a').filter((_, el) => {
+                return $(el).text().trim() === (currentPage + 1).toString() || 
+                       $(el).hasClass('next');
+            }).length > 0;
+            
+            if (!hasNextPage) break;
+            currentPage++;
+        } catch (error) {
+            console.warn(`⚠️ Warning: Error processing author page ${currentPage}: ${error.message}`);
+            break; // Stop pagination on error
+        }
+    }
+    
+    return allWorks;
+}
+
 async function crawlNovel(startUrl) {
     try {
         console.log(`Starting crawl for URL: ${startUrl}`);
@@ -33,18 +106,18 @@ async function crawlNovel(startUrl) {
             }
         });
 
-        // === FETCH THE MAIN PAGE (which contains both metadata AND chapter list) ===
+        // === FETCH MAIN NOVEL PAGE ===
         console.log('Fetching novel page for metadata and chapter list...');
         const mainPageResponse = await axiosInstance.get(startUrl);
         const $main = cheerio.load(mainPageResponse.data);
 
-        // --- Extract Metadata ---
+        // --- Extract Metadata (existing) ---
         const novelTitle = $main('.n-text h1').first().text().trim() || 'Untitled';
-        const cover = $main('.n-img img').attr('src') || '';
+        const cover = resolveUrl($main('.n-img img').attr('src'), baseUrl);
         const author = $main('.n-text p a.bauthor').first().text().trim() || 'Unknown';
-
+        
         const authorUrlEl = $main('.n-text p a.bauthor').attr('href');
-        const authorUrl = authorUrlEl ? new URL(authorUrlEl, startUrl).href : null;
+        const authorUrl = authorUrlEl ? resolveUrl(authorUrlEl, baseUrl) : null;
 
         let status = 'Unknown';
         if ($main('.n-text p .lz').length) {
@@ -54,7 +127,6 @@ async function crawlNovel(startUrl) {
         }
 
         const description = $main('#intro').text().trim() || '';
-
         const genres = [];
         $main('.tags em a').each((_, el) => {
             const tag = $main(el).text().trim();
@@ -68,12 +140,32 @@ async function crawlNovel(startUrl) {
         if (!latestChapterMatch) throw new Error('Could not extract chapter number from URL');
         const latestChapter = parseInt(latestChapterMatch[1], 10);
 
-        // Generate chapter URLs from 1 to latestChapter (but download from latest → 1)
+        // Generate chapter URLs
         const chapterUrls = Array.from({ length: latestChapter }, (_, i) =>
             `${baseUrl}/read/${novelId}/p${latestChapter - i}.html`
         );
 
         console.log(`Found ${chapterUrls.length} chapters. Novel: "${novelTitle}" by ${author}`);
+
+        // === FETCH AUTHOR'S OTHER WORKS ===
+        let otherWorks = [];
+        if (authorUrl) {
+            try {
+                console.log(`Fetching author page: ${authorUrl}`);
+                otherWorks = await fetchAuthorWorks(
+                    axiosInstance, 
+                    authorUrl, 
+                    baseUrl, 
+                    novelId
+                );
+                console.log(`✅ Extracted ${otherWorks.length} other works from author page`);
+            } catch (error) {
+                console.warn(`⚠️ Warning: Failed to fetch author works: ${error.message}`);
+                // Continue crawl without failing
+            }
+        } else {
+            console.log('⚠️ No author URL found - skipping other works extraction');
+        }
 
         // --- Prepare output directory ---
         const resultDir = path.join(__dirname, '../results');
@@ -84,7 +176,7 @@ async function crawlNovel(startUrl) {
         const outputFile = path.join(resultDir, `${novelId}.json`);
         const chapters = [];
 
-        // --- Download chapters ---
+        // --- Download chapters (existing logic) ---
         const queue = new PQueue({ concurrency: 25 });
         let completed = 0;
 
@@ -101,22 +193,15 @@ async function crawlNovel(startUrl) {
                     const response = await axiosInstance.get(url);
                     const $ = cheerio.load(response.data);
 
-                    // Clean unwanted elements (like the browser script does)
                     $('script, style, iframe, noscript, .abg, .ad, .ads, .hidden').remove();
 
-                    // Extract title - preserve as-is like browser script
                     let title = $('article.page-content > h3').first().text().trim() || '';
-
-                    // Extract paragraphs - PRESERVE HTML STRUCTURE like the browser script
                     const paragraphs = [];
+                    
                     $('article.page-content section p').each((_, el) => {
                         const $p = $(el);
-                        // Skip unwanted paragraphs (same filters as browser script)
-                        if ($p.hasClass('abg') || $p.closest('.ad').length || $p.closest('.ads').length) {
-                            return;
-                        }
+                        if ($p.hasClass('abg') || $p.closest('.ad, .ads').length) return;
                         
-                        // Get the HTML content of the paragraph, preserving formatting
                         const htmlContent = $p.html();
                         if (htmlContent && htmlContent.trim().length > 0) {
                             paragraphs.push(`<p>${htmlContent.trim()}</p>`);
@@ -124,13 +209,9 @@ async function crawlNovel(startUrl) {
                     });
 
                     const chapterNumber = chapterUrls.length - index;
-
-                    // Build content with preserved HTML structure (like browser script)
                     let content = paragraphs.join('\n');
 
-                    if (!title && !content) {
-                        return; // skip empty
-                    }
+                    if (!title && !content) return;
                     if (!content) content = "<p>Chapter is missing</p>";
                     if (!title) title = `Chapter ${chapterNumber}`;
 
@@ -149,7 +230,7 @@ async function crawlNovel(startUrl) {
 
         const filteredChapters = chapters.filter(ch => ch !== undefined);
 
-        // --- Final output with metadata ---
+        // --- Final output with enhanced metadata ---
         const finalOutput = {
             meta: {
                 id: novelId,
@@ -161,14 +242,15 @@ async function crawlNovel(startUrl) {
                 description,
                 genres,
                 totalChapters: filteredChapters.length,
-                sourceUrl: startUrl
+                sourceUrl: startUrl,
+                otherWorks // ✨ NEW: Author's other works
             },
             chapters: filteredChapters
         };
 
         console.log('\n');
         await writeFile(outputFile, JSON.stringify(finalOutput, null, 2), 'utf8');
-        console.log(`✅ Saved ${filteredChapters.length} chapters + metadata to ${outputFile}`);
+        console.log(`✅ Saved ${filteredChapters.length} chapters + metadata (including ${otherWorks.length} other works) to ${outputFile}`);
 
         return outputFile;
     } catch (error) {
@@ -181,7 +263,7 @@ async function crawlNovel(startUrl) {
 const url = process.argv[2] || process.env.INPUT_URL;
 if (!url) {
     console.error('Usage: node crawler.js <novel-url>');
-    console.error('Example: node crawler.js https://ixdzs.tw/read/620883/');
+    console.error('Example: node crawler.js https://ixdzs.tw/read/617729/');
     process.exit(1);
 }
 
