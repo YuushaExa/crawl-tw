@@ -1,0 +1,16 @@
+{
+  "name": "novel-crawler",
+  "version": "1.0.0",
+  "description": "A web crawler for novel chapters",
+  "main": "script/script.js",
+  "scripts": {
+    "start": "node script/script.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "axios": "^1.6.7",
+    "cheerio": "^1.0.0-rc.12",
+    "p-queue": "^8.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
