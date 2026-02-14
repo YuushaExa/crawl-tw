@@ -148,17 +148,17 @@ async function crawlNovel(startUrl) {
         console.log(`Found ${chapterUrls.length} chapters. Novel: "${novelTitle}" by ${author}`);
 
         // === FETCH AUTHOR'S OTHER WORKS ===
-        let otherWorks = [];
+        let otherworks = [];
         if (authorUrl) {
             try {
                 console.log(`Fetching author page: ${authorUrl}`);
-                otherWorks = await fetchAuthorWorks(
+                otherworks = await fetchAuthorWorks(
                     axiosInstance, 
                     authorUrl, 
                     baseUrl, 
                     novelId
                 );
-                console.log(`✅ Extracted ${otherWorks.length} other works from author page`);
+                console.log(`✅ Extracted ${otherworks.length} other works from author page`);
             } catch (error) {
                 console.warn(`⚠️ Warning: Failed to fetch author works: ${error.message}`);
                 // Continue crawl without failing
@@ -243,14 +243,14 @@ async function crawlNovel(startUrl) {
                 genres,
                 totalChapters: filteredChapters.length,
                 sourceUrl: startUrl,
-                otherWorks // ✨ NEW: Author's other works
+                otherworks // ✨ NEW: Author's other works
             },
             chapters: filteredChapters
         };
 
         console.log('\n');
         await writeFile(outputFile, JSON.stringify(finalOutput, null, 2), 'utf8');
-        console.log(`✅ Saved ${filteredChapters.length} chapters + metadata (including ${otherWorks.length} other works) to ${outputFile}`);
+        console.log(`✅ Saved ${filteredChapters.length} chapters + metadata (including ${otherworks.length} other works) to ${outputFile}`);
 
         return outputFile;
     } catch (error) {
