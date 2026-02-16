@@ -30,7 +30,20 @@ jobs:
       
     - name: Run crawler
       run: node script/script-tg.js "${{ github.event.inputs.url }}"
-        
+      
+    - name: Send to Telegram
+      env:
+        BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        URL: ${{ github.event.inputs.url }}
+      run: |
+        FILE=$(ls results-tg/*.zip 2>/dev/null | head -1)
+        [ -z "$FILE" ] && echo "No zip found!" && exit 1
+        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" \
+          -F chat_id="$CHAT_ID" \
+          -F document=@"$FILE" \
+          -F caption="📚 Crawl Done%0A🔗 $URL%0A📄 $(basename $FILE)"
+          
     - name: Commit and push results
       run: |
         git config --global user.name "GitHub Actions"
