@@ -18,7 +18,7 @@ jobs:
         fetch-depth: 0  # Needed to push changes back
         
     - name: Clear results folder
-      run: rm -rf results || true
+      run: rm -rf results-tg || true
 
     - name: Set up Node.js
       uses: actions/setup-node@v4
@@ -35,7 +35,7 @@ jobs:
       run: |
         git config --global user.name "GitHub Actions"
         git config --global user.email "actions@github.com"
-        mkdir -p results  # Ensure dir exists even if empty
-        git add results
+        mkdir -p results-tg  # Ensure dir exists even if empty
+        git add results-tg
         git commit -m "Updated novel crawl results" || echo "No changes to commit"
         git push
