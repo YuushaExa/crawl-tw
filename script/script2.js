@@ -108,15 +108,7 @@ async function checkAndSaveMetadata(metadata, axiosInstance) {
         } else {
             console.log('✅ Title is Original. Saving metadata to worker...');
         }
-        
-        // 3. Prepare metadata for API (match HTML structure)
-        // Map 'image' to 'cover' for otherworks to match frontend expectation
-        const formattedOtherWorks = (metadata.otherworks || []).map(work => ({
-            ...work,
-            cover: work.image || '', 
-            author: metadata.author // Include author if needed by worker
-        }));
-        
+    
         const payload = {
             title: metadata.title,
             cover: metadata.cover,
@@ -124,8 +116,7 @@ async function checkAndSaveMetadata(metadata, axiosInstance) {
             status: metadata.status,
             genres: metadata.genres,
             description: metadata.description,
-            authorUrl: metadata.authorUrl,
-            otherworks: formattedOtherWorks
+            authorUrl: metadata.authorUrl
         };
         
         // 4. Send to Worker API
@@ -240,8 +231,7 @@ async function crawlNovel(startUrl) {
             authorUrl,
             status,
             description,
-            genres,
-            otherworks
+            genres
         };
         
         // Run check/save (does not block crawl if it fails)
