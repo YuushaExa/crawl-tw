@@ -1,4 +1,4 @@
-name: Novel Crawler TG
+name: Novel Crawler TG (Direct Upload)
 
 on:
   workflow_dispatch:
@@ -8,16 +8,17 @@ on:
         required: true
 
 jobs:
-  crawl:
+  crawl-and-send:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      # We only need the code to run the script, no history needed
       with:
-        fetch-depth: 0  # Needed to push changes back
+        fetch-depth: 1 
         
-    - name: Clear results folder
+    - name: Clear results folder (optional cleanup)
       run: rm -rf results-tg || true
 
     - name: Set up Node.js
@@ -30,25 +31,30 @@ jobs:
       
     - name: Run crawler
       run: node script/script-tg.js "${{ github.event.inputs.url }}"
-      
-    - name: Send to Telegram
+        
+    - name: Upload result directly to Telegram
       env:
-        BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        URL: ${{ github.event.inputs.url }}
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: |
-        FILE=$(ls results-tg/*.zip 2>/dev/null | head -1)
-        [ -z "$FILE" ] && echo "No zip found!" && exit 1
-        curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" \
-          -F chat_id="$CHAT_ID" \
-          -F document=@"$FILE" \
-          -F caption="📚 Crawl Done%0A🔗 $URL%0A📄 $(basename $FILE)"
-          
-    - name: Commit and push results
-      run: |
-        git config --global user.name "GitHub Actions"
-        git config --global user.email "actions@github.com"
-        mkdir -p results-tg  # Ensure dir exists even if empty
-        git add results-tg
-        git commit -m "Updated novel crawl results" || echo "No changes to commit"
-        git push
+        # Find the generated zip file
+        FILE_PATH=$(find results-tg -name "*.zip" -type f | head -n 1)
+
+        if [ -z "$FILE_PATH" ]; then
+          echo "::error::No .zip file found in results-tg. Did the crawler fail?"
+          exit 1
+        fi
+
+        echo "✅ Found file: $FILE_PATH"
+        FILE_NAME=$(basename "$FILE_PATH")
+        INPUT_URL="${{ github.event.inputs.url }}"
+
+        # Send to Telegram
+        echo "🚀 Uploading to Telegram channel..."
+        curl -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+          -F "chat_id=${TG_CHAT_ID}" \
+          -F "document=@${FILE_PATH}" \
+          -F "caption=📚 <b>Crawl Complete</b>%0A%0A🔗 <b>Source:</b> ${INPUT_URL}%0A📄 <b>File:</b> ${FILE_NAME}" \
+          -F "parse_mode=HTML"
+
+        echo "✅ Upload successful!"
