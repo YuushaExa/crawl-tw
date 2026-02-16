@@ -1,4 +1,4 @@
-name: Novel Crawler
+name: Novel Crawler TG
 
 on:
   workflow_dispatch:
