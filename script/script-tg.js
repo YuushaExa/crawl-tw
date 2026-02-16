@@ -169,7 +169,7 @@ async function checkAndSaveMetadata(metadata, axiosInstance) {
 
 async function crawlNovel(startUrl) {
     let novelTitleSafe = "unknown_novel";
-    let resultDir = path.join(__dirname, '../results');
+    let resultDir = path.join(__dirname, '../results-tg');
     let zipPath = "";
 
     try {
