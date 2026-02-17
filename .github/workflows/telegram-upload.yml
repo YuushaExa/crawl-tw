@@ -73,10 +73,8 @@ jobs:
               continue
             fi
             
-            # Escape HTML for caption (this is what users will see)
             caption=$(printf '%s' "$filename" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
             
-            # Use simple counter-based temp filename (NO special chars!)
             temp_file="${UPLOAD_TEMP_DIR}/upload_${file_counter}.epub"
             
             echo "Copying to temp: $temp_file"
@@ -108,30 +106,51 @@ jobs:
             max_retries=5
             retry_count=0
             upload_success=false
+            use_original_name=true
             
             while [ $retry_count -lt $max_retries ]; do
               echo "Uploading: $filename (attempt $((retry_count + 1))/$max_retries)"
               
-              # KEY FIX: Removed filename= parameter to avoid curl parsing issues
-              # The caption shows the real filename to users
-              response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-                "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-                --form "chat_id=${TG_CHAT_ID}" \
-                --form "document=@${temp_file}" \
-                --form "caption=${caption}" \
-                --form "parse_mode=HTML")
+              if [ "$use_original_name" = true ]; then
+                # TRY 1: Use original filename in multipart
+                echo "  → Mode: Original filename"
+                response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+                  "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+                  --form "chat_id=${TG_CHAT_ID}" \
+                  --form "document=@${temp_file};filename=${filename}" \
+                  --form "caption=${caption}" \
+                  --form "parse_mode=HTML")
+              else
+                # TRY 2: Fallback to safe mode (no filename parameter)
+                echo "  → Mode: Fallback (safe mode)"
+                response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+                  "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+                  --form "chat_id=${TG_CHAT_ID}" \
+                  --form "document=@${temp_file}" \
+                  --form "caption=${caption}" \
+                  --form "parse_mode=HTML")
+              fi
               
               curl_exit_code=$?
               http_code=$(echo "$response" | grep "HTTP_CODE:" | cut -d':' -f2)
               response_body=$(echo "$response" | sed '/HTTP_CODE:/d')
               
-              echo "curl exit code: $curl_exit_code, HTTP: $http_code"
+              echo "  → curl exit code: $curl_exit_code, HTTP: $http_code"
               
               if [ $curl_exit_code -ne 0 ]; then
-                echo "⚠ curl failed: exit code $curl_exit_code"
+                echo "  ⚠ curl failed: exit code $curl_exit_code"
+                
+                # If using original name and got error 26, switch to fallback mode
+                if [ "$use_original_name" = true ] && [ $curl_exit_code -eq 26 ]; then
+                  echo "  → Switching to fallback mode (safe filename)..."
+                  use_original_name=false
+                  retry_count=$((retry_count + 1))
+                  continue
+                fi
+                
                 retry_count=$((retry_count + 1))
                 if [ $retry_count -lt $max_retries ]; then
-                  echo "Retrying in 5s..."
+                  echo "  → Retrying in 5s..."
                   sleep 5
                   continue
                 else
@@ -143,8 +162,13 @@ jobs:
               fi
               
               if echo "$response_body" | grep -q '"ok":true'; then
-                echo "✓ Success: $filename"
-                echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB" >> upload_log.txt
+                if [ "$use_original_name" = true ]; then
+                  echo "✓ Success: $filename (original name)"
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB - Original Name" >> upload_log.txt
+                else
+                  echo "✓ Success: $filename (fallback mode)"
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB - Fallback Name" >> upload_log.txt
+                fi
                 uploaded_files=$((uploaded_files + 1))
                 upload_success=true
                 break
@@ -157,9 +181,18 @@ jobs:
               else
                 echo "✗ API error:"
                 echo "$response_body"
+                
+                # If using original name and API error, try fallback mode
+                if [ "$use_original_name" = true ]; then
+                  echo "  → Switching to fallback mode (safe filename)..."
+                  use_original_name=false
+                  retry_count=$((retry_count + 1))
+                  continue
+                fi
+                
                 retry_count=$((retry_count + 1))
                 if [ $retry_count -lt $max_retries ]; then
-                  echo "Retrying in 5s..."
+                  echo "  → Retrying in 5s..."
                   sleep 5
                   continue
                 else
