@@ -49,12 +49,12 @@ jobs:
             max_retries=5
             retry_count=0
             
-            while [ $retry_count -lt $max_retries ]; do
-              response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-                -F "chat_id=${TG_CHAT_ID}" \
-                -F "document=@${FILE_PATH}" \
-                -F "caption=📚 ${FILE_NAME}" \
-                -F "parse_mode=HTML"
+          while [ $retry_count -lt $max_retries ]; do
+           response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+          -F "chat_id=${TG_CHAT_ID}" \
+          -F "document=@${file}" \
+          -F "caption=📚 ${filename}" \
+          -F "parse_mode=HTML")
               
               if echo "$response" | grep -q '"ok":true'; then
                 echo "✓ Success: $filename"
