@@ -12,7 +12,7 @@ jobs:
   process-and-upload:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code (Optional)
+      - name: Checkout Code
         uses: actions/checkout@v3
 
       - name: Download ZIP File
@@ -24,12 +24,11 @@ jobs:
 
       - name: Unzip File
         run: |
-          # Find the downloaded zip file and extract it
           for zip in *.zip; do
             if [ -f "$zip" ]; then
               echo "Extracting $zip"
               unzip -o "$zip"
-              rm "$zip" # Clean up the zip to avoid uploading it
+              rm "$zip"
             fi
           done
 
@@ -40,26 +39,49 @@ jobs:
         run: |
           echo "Starting upload to Telegram..."
           
-          # Find all files recursively, excluding hidden directories
+          # Rate limit: seconds to wait between each file upload
+          RATE_LIMIT_DELAY=2
+          
           while IFS= read -r -d '' file; do
             filename=$(basename "$file")
             echo "Uploading: $filename"
             
-            # Send Document API Endpoint
-            # We use ;filename= to preserve the original filename in Telegram
-            response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-              -F "chat_id=${TG_CHAT_ID}" \
-              -F "document=@${file};filename=${filename}")
+            max_retries=5
+            retry_count=0
             
-            # Check if upload was successful
-            if echo "$response" | grep -q '"ok":true'; then
-              echo "✓ Success: $filename"
-            else
-              echo "✗ Failed: $filename"
-              echo "Response: $response"
-              # Exit on failure (optional, remove 'exit 1' if you want to continue other files)
-              exit 1 
+            while [ $retry_count -lt $max_retries ]; do
+              response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+                -F "chat_id=${TG_CHAT_ID}" \
+                -F "document=@${file};filename=${filename}")
+              
+              if echo "$response" | grep -q '"ok":true'; then
+                echo "✓ Success: $filename"
+                break
+              elif echo "$response" | grep -q '"error_code":429'; then
+                # Extract retry_after from JSON response
+                retry_after=$(echo "$response" | grep -o '"retry_after":[0-9]*' | grep -o '[0-9]*')
+                if [ -z "$retry_after" ]; then
+                  retry_after=30
+                fi
+                retry_count=$((retry_count + 1))
+                echo "⚠ Rate limited. Waiting ${retry_after}s before retry ($retry_count/$max_retries)..."
+                sleep "$retry_after"
+              else
+                echo "✗ Failed: $filename"
+                echo "Response: $response"
+                exit 1
+              fi
+            done
+            
+            if [ $retry_count -eq $max_retries ]; then
+              echo "✗ Max retries reached for $filename"
+              exit 1
             fi
+            
+            # Wait between successful uploads to avoid hitting rate limit
+            echo "Waiting ${RATE_LIMIT_DELAY}s before next file..."
+            sleep "$RATE_LIMIT_DELAY"
+            
           done < <(find . -type f -not -path '*/\.*' -print0)
           
-          echo "All files processed."
+          echo "✅ All files processed successfully."
