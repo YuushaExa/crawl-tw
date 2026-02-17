@@ -54,7 +54,7 @@ jobs:
         curl -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
           -F "chat_id=${TG_CHAT_ID}" \
           -F "document=@${FILE_PATH}" \
-          -F "caption=📚 <b>Crawl Complete</b>%0A%0A🔗 <b>Source:</b> ${INPUT_URL}%0A📄 <b>File:</b> ${FILE_NAME}" \
+          -F "caption=📚 ${FILE_NAME}" \
           -F "parse_mode=HTML"
 
         echo "✅ Upload successful!"
