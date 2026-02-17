@@ -40,57 +40,69 @@ jobs:
           echo "Starting EPUB upload to Telegram..."
           
           RATE_LIMIT_DELAY=2
-          UPLOAD_TEMP_DIR=".upload_tmp"
-          MAX_FILE_SIZE=52428800  # 50MB in bytes
+          UPLOAD_TEMP_DIR="/tmp/telegram_upload_$$"
+          MAX_FILE_SIZE=52428800
           
           mkdir -p "$UPLOAD_TEMP_DIR"
           
-          # Counters for summary
           total_files=0
           uploaded_files=0
           skipped_size_files=0
           skipped_error_files=0
+          file_counter=0
           
-          # Initialize log file
           echo "📋 EPUB Upload Log - $(date '+%Y-%m-%d %H:%M:%S')" > upload_log.txt
           echo "==========================================" >> upload_log.txt
           
           while IFS= read -r -d '' file; do
             total_files=$((total_files + 1))
+            file_counter=$((file_counter + 1))
             filename=$(basename "$file")
             
-            # Get file size (cross-platform compatible)
             file_size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
-            
-            # Convert to human-readable format for logging
             size_mb=$(awk "BEGIN {printf \"%.2f\", $file_size/1048576}")
             
             echo "=========================================="
             echo "File: $filename"
             echo "Size: ${size_mb} MB ($file_size bytes)"
             
-            # Check file size limit
             if [ "$file_size" -gt "$MAX_FILE_SIZE" ]; then
-              echo "⚠ SKIPPED (SIZE): $filename exceeds 50MB limit (${size_mb} MB)"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (SIZE) - $filename - ${size_mb}MB - Exceeds 50MB limit" >> upload_log.txt
+              echo "⚠ SKIPPED (SIZE): $filename exceeds 50MB limit"
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (SIZE) - $filename - ${size_mb}MB" >> upload_log.txt
               skipped_size_files=$((skipped_size_files + 1))
               continue
             fi
             
-            # Escape HTML for caption
             caption=$(printf '%s' "$filename" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
             
-            # Create sanitized temp filename for curl
-            safe_name=$(printf '%s' "$filename" | sed 's/[^a-zA-Z0-9._-]/_/g')
-            temp_file="${UPLOAD_TEMP_DIR}/${safe_name}"
+            # Use simple counter-based temp filename (no special chars!)
+            temp_file="${UPLOAD_TEMP_DIR}/upload_${file_counter}.epub"
             
-            # Copy to temp location
+            echo "Copying to temp: $temp_file"
             cp -- "$file" "$temp_file"
             copy_status=$?
             
             if [ $copy_status -ne 0 ]; then
-              echo "✗ SKIPPED (COPY ERROR): Failed to copy $filename (exit code: $copy_status)"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (COPY ERROR) - $filename - ${size_mb}MB - Copy failed (exit: $copy_status)" >> upload_log.txt
+              echo "✗ SKIPPED (COPY ERROR): Exit code $copy_status"
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (COPY) - $filename - Exit $copy_status" >> upload_log.txt
+              skipped_error_files=$((skipped_error_files + 1))
+              continue
+            fi
+            
+            # Verify temp file exists and is readable
+            if [ ! -f "$temp_file" ]; then
+              echo "✗ SKIPPED: Temp file not created"
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (NO FILE) - $filename" >> upload_log.txt
+              skipped_error_files=$((skipped_error_files + 1))
+              continue
+            fi
+            
+            temp_size=$(stat -c%s "$temp_file" 2>/dev/null || stat -f%z "$temp_file" 2>/dev/null)
+            echo "Temp file size: $temp_size bytes"
+            
+            if [ "$temp_size" -eq 0 ]; then
+              echo "✗ SKIPPED: Temp file is empty"
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (EMPTY) - $filename" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
               rm -f "$temp_file"
               continue
@@ -101,123 +113,101 @@ jobs:
             upload_success=false
             
             while [ $retry_count -lt $max_retries ]; do
-              echo "Uploading to Telegram: $filename (attempt $((retry_count + 1))/$max_retries)"
+              echo "Uploading: $filename (attempt $((retry_count + 1))/$max_retries)"
               
-              response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-                -F "chat_id=${TG_CHAT_ID}" \
-                -F "document=@${temp_file};filename=${filename}" \
-                -F "caption=${caption}" \
-                -F "parse_mode=HTML")
+              # Use explicit --form with proper syntax
+              response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+                "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+                --form "chat_id=${TG_CHAT_ID}" \
+                --form "document=@${temp_file};filename=${filename}" \
+                --form "caption=${caption}" \
+                --form "parse_mode=HTML")
               
               curl_exit_code=$?
+              http_code=$(echo "$response" | grep "HTTP_CODE:" | cut -d':' -f2)
+              response_body=$(echo "$response" | sed '/HTTP_CODE:/d')
               
-              # Check curl exit code first
+              echo "curl exit code: $curl_exit_code, HTTP: $http_code"
+              
               if [ $curl_exit_code -ne 0 ]; then
-                echo "⚠ curl failed with exit code: $curl_exit_code"
-                
-                if [ $curl_exit_code -eq 26 ]; then
-                  echo "  → Error 26: Failed to read/write local file"
-                elif [ $curl_exit_code -eq 28 ]; then
-                  echo "  → Error 28: Connection timeout"
-                elif [ $curl_exit_code -eq 7 ]; then
-                  echo "  → Error 7: Failed to connect to host"
-                fi
-                
+                echo "⚠ curl failed: exit code $curl_exit_code"
                 retry_count=$((retry_count + 1))
                 if [ $retry_count -lt $max_retries ]; then
-                  echo "  → Retrying in 5 seconds..."
+                  echo "Retrying in 5s..."
                   sleep 5
                   continue
                 else
-                  echo "✗ SKIPPED (CURL ERROR): $filename - curl exit code $curl_exit_code after $max_retries attempts"
-                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (CURL ERROR) - $filename - ${size_mb}MB - curl exit $curl_exit_code" >> upload_log.txt
+                  echo "✗ SKIPPED (CURL): Exit $curl_exit_code after $max_retries attempts"
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (CURL $curl_exit_code) - $filename" >> upload_log.txt
                   skipped_error_files=$((skipped_error_files + 1))
-                  upload_success=false
                   break
                 fi
               fi
               
-              # Check Telegram API response
-              if echo "$response" | grep -q '"ok":true'; then
+              if echo "$response_body" | grep -q '"ok":true'; then
                 echo "✓ Success: $filename"
                 echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB" >> upload_log.txt
                 uploaded_files=$((uploaded_files + 1))
                 upload_success=true
                 break
-              elif echo "$response" | grep -q '"error_code":429'; then
-                retry_after=$(echo "$response" | grep -o '"retry_after":[0-9]*' | grep -o '[0-9]*' || echo "30")
+              elif echo "$response_body" | grep -q '"error_code":429'; then
+                retry_after=$(echo "$response_body" | grep -o '"retry_after":[0-9]*' | grep -o '[0-9]*' || echo "30")
                 [ -z "$retry_after" ] && retry_after=30
                 retry_count=$((retry_count + 1))
-                echo "⚠ Rate limited. Waiting ${retry_after}s before retry ($retry_count/$max_retries)..."
+                echo "⚠ Rate limited. Waiting ${retry_after}s..."
                 sleep "$retry_after"
               else
-                echo "✗ Telegram API error for $filename"
-                echo "Response: $response"
+                echo "✗ API error:"
+                echo "$response_body"
                 retry_count=$((retry_count + 1))
                 if [ $retry_count -lt $max_retries ]; then
-                  echo "  → Retrying in 5 seconds..."
+                  echo "Retrying in 5s..."
                   sleep 5
                   continue
                 else
-                  echo "✗ SKIPPED (API ERROR): $filename after $max_retries attempts"
-                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (API ERROR) - $filename - ${size_mb}MB - API error" >> upload_log.txt
+                  echo "✗ SKIPPED (API): After $max_retries attempts"
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (API) - $filename" >> upload_log.txt
                   skipped_error_files=$((skipped_error_files + 1))
-                  upload_success=false
                   break
                 fi
               fi
             done
             
-            # Handle case where all retries exhausted without explicit break
-            if [ "$upload_success" = false ] && [ $retry_count -eq $max_retries ]; then
+            if [ "$upload_success" = false ] && [ $retry_count -ge $max_retries ]; then
               echo "✗ SKIPPED (MAX RETRIES): $filename"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (MAX RETRIES) - $filename - ${size_mb}MB" >> upload_log.txt
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (RETRIES) - $filename" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
             fi
             
-            # Cleanup temp file
             rm -f "$temp_file"
             
-            echo "Waiting ${RATE_LIMIT_DELAY}s before next file..."
+            echo "Waiting ${RATE_LIMIT_DELAY}s..."
             sleep "$RATE_LIMIT_DELAY"
             
           done < <(find . -type f -iname '*.epub' -not -path '*/\.*' -print0)
           
-          # Cleanup temp directory
           rm -rf "$UPLOAD_TEMP_DIR"
           
-          # Print summary
           echo ""
           echo "=========================================="
           echo "📊 UPLOAD SUMMARY"
           echo "=========================================="
-          echo "Total EPUB files found: $total_files"
+          echo "Total: $total_files"
           echo "✓ Uploaded: $uploaded_files"
-          echo "⚠ Skipped (>50MB): $skipped_size_files"
+          echo "⚠ Skipped (Size): $skipped_size_files"
           echo "⚠ Skipped (Errors): $skipped_error_files"
           echo "=========================================="
           
-          # Append summary to log
           echo "" >> upload_log.txt
-          echo "==========================================" >> upload_log.txt
-          echo "SUMMARY" >> upload_log.txt
-          echo "==========================================" >> upload_log.txt
-          echo "Total: $total_files" >> upload_log.txt
-          echo "Uploaded: $uploaded_files" >> upload_log.txt
-          echo "Skipped (Size): $skipped_size_files" >> upload_log.txt
-          echo "Skipped (Errors): $skipped_error_files" >> upload_log.txt
+          echo "SUMMARY: Total=$total_files, Uploaded=$uploaded_files, Skipped_Size=$skipped_size_files, Skipped_Errors=$skipped_error_files" >> upload_log.txt
           
-          # Upload log file to Telegram if there were skips or failures
           if [ "$skipped_size_files" -gt 0 ] || [ "$skipped_error_files" -gt 0 ]; then
-            echo ""
-            echo "📎 Uploading log file to Telegram..."
+            echo "📎 Uploading log to Telegram..."
             curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
               -F "chat_id=${TG_CHAT_ID}" \
               -F "document=@upload_log.txt" \
-              -F "caption=📋 Upload Log - $uploaded_files uploaded, $skipped_size_files skipped (size), $skipped_error_files skipped (errors)" \
+              -F "caption=📋 Upload Log" \
               -F "parse_mode=HTML"
-            echo "✓ Log file sent to Telegram"
           fi
           
-          echo ""
-          echo "✅ Workflow completed successfully."
+          echo "✅ Workflow completed."
