@@ -1,4 +1,4 @@
-name: Download, Unzip and Upload to Telegram
+name: Download, Unzip and Upload EPUBs to Telegram
 
 on:
   workflow_dispatch:
@@ -32,36 +32,40 @@ jobs:
             fi
           done
 
-      - name: Upload Files to Telegram
+      - name: Upload EPUB Files to Telegram
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          echo "Starting upload to Telegram..."
+          echo "Starting EPUB upload to Telegram..."
           
           # Rate limit: seconds to wait between each file upload
           RATE_LIMIT_DELAY=2
           
+          # Find only .epub files, null-separated for safety
           while IFS= read -r -d '' file; do
             filename=$(basename "$file")
             echo "Uploading: $filename"
             
+            # Escape HTML-sensitive characters for caption (parse_mode=HTML)
+            caption=$(printf '%s' "$filename" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+            
             max_retries=5
             retry_count=0
             
-          while [ $retry_count -lt $max_retries ]; do
-           response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-          -F "chat_id=${TG_CHAT_ID}" \
-          -F "document=@${file}" \
-          -F "caption=📚 ${filename}" \
-          -F "parse_mode=HTML")
+            while [ $retry_count -lt $max_retries ]; do
+              response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+                -F "chat_id=${TG_CHAT_ID}" \
+                -F "document=@${file};filename=${filename}" \
+                -F "caption=${caption}" \
+                -F "parse_mode=HTML")
               
               if echo "$response" | grep -q '"ok":true'; then
                 echo "✓ Success: $filename"
                 break
               elif echo "$response" | grep -q '"error_code":429'; then
                 # Extract retry_after from JSON response
-                retry_after=$(echo "$response" | grep -o '"retry_after":[0-9]*' | grep -o '[0-9]*')
+                retry_after=$(echo "$response" | grep -o '"retry_after":[0-9]*' | grep -o '[0-9]*' || echo "30")
                 if [ -z "$retry_after" ]; then
                   retry_after=30
                 fi
@@ -84,6 +88,6 @@ jobs:
             echo "Waiting ${RATE_LIMIT_DELAY}s before next file..."
             sleep "$RATE_LIMIT_DELAY"
             
-          done < <(find . -type f -not -path '*/\.*' -print0)
+          done < <(find . -type f -iname '*.epub' -not -path '*/\.*' -print0)
           
-          echo "✅ All files processed successfully."
+          echo "✅ All EPUB files processed successfully."
