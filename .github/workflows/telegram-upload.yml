@@ -73,26 +73,23 @@ jobs:
               continue
             fi
             
+            # Escape HTML for caption (this is what users will see)
             caption=$(printf '%s' "$filename" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
             
-            # Use simple counter-based temp filename (no special chars!)
+            # Use simple counter-based temp filename (NO special chars!)
             temp_file="${UPLOAD_TEMP_DIR}/upload_${file_counter}.epub"
             
             echo "Copying to temp: $temp_file"
-            cp -- "$file" "$temp_file"
-            copy_status=$?
-            
-            if [ $copy_status -ne 0 ]; then
-              echo "✗ SKIPPED (COPY ERROR): Exit code $copy_status"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (COPY) - $filename - Exit $copy_status" >> upload_log.txt
+            if ! cp -- "$file" "$temp_file"; then
+              echo "✗ SKIPPED (COPY ERROR)"
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (COPY) - $filename" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
               continue
             fi
             
-            # Verify temp file exists and is readable
-            if [ ! -f "$temp_file" ]; then
-              echo "✗ SKIPPED: Temp file not created"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (NO FILE) - $filename" >> upload_log.txt
+            if [ ! -f "$temp_file" ] || [ ! -r "$temp_file" ]; then
+              echo "✗ SKIPPED: Temp file not readable"
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (NOT READABLE) - $filename" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
               continue
             fi
@@ -115,11 +112,12 @@ jobs:
             while [ $retry_count -lt $max_retries ]; do
               echo "Uploading: $filename (attempt $((retry_count + 1))/$max_retries)"
               
-              # Use explicit --form with proper syntax
+              # KEY FIX: Removed filename= parameter to avoid curl parsing issues
+              # The caption shows the real filename to users
               response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
                 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
                 --form "chat_id=${TG_CHAT_ID}" \
-                --form "document=@${temp_file};filename=${filename}" \
+                --form "document=@${temp_file}" \
                 --form "caption=${caption}" \
                 --form "parse_mode=HTML")
               
