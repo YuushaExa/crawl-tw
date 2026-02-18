@@ -37,6 +37,10 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
+          # CRITICAL: Disable exit-on-error so we can handle curl failures
+          set +e
+          set -o pipefail
+          
           echo "Starting EPUB upload to Telegram..."
           
           RATE_LIMIT_DELAY=2
@@ -78,7 +82,10 @@ jobs:
             temp_file="${UPLOAD_TEMP_DIR}/upload_${file_counter}.epub"
             
             echo "Copying to temp: $temp_file"
-            if ! cp -- "$file" "$temp_file"; then
+            cp -- "$file" "$temp_file"
+            copy_status=$?
+            
+            if [ $copy_status -ne 0 ]; then
               echo "✗ SKIPPED (COPY ERROR)"
               echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (COPY) - $filename" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
@@ -112,26 +119,26 @@ jobs:
               echo "Uploading: $filename (attempt $((retry_count + 1))/$max_retries)"
               
               if [ "$use_original_name" = true ]; then
-                # TRY 1: Use original filename in multipart
                 echo "  → Mode: Original filename"
+                # CRITICAL: Use || true to prevent script exit on curl failure
                 response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
                   "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
                   --form "chat_id=${TG_CHAT_ID}" \
                   --form "document=@${temp_file};filename=${filename}" \
                   --form "caption=${caption}" \
-                  --form "parse_mode=HTML")
+                  --form "parse_mode=HTML" || true)
+                curl_exit_code=${PIPESTATUS[0]}
               else
-                # TRY 2: Fallback to safe mode (no filename parameter)
                 echo "  → Mode: Fallback (safe mode)"
                 response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
                   "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
                   --form "chat_id=${TG_CHAT_ID}" \
                   --form "document=@${temp_file}" \
                   --form "caption=${caption}" \
-                  --form "parse_mode=HTML")
+                  --form "parse_mode=HTML" || true)
+                curl_exit_code=${PIPESTATUS[0]}
               fi
               
-              curl_exit_code=$?
               http_code=$(echo "$response" | grep "HTTP_CODE:" | cut -d':' -f2)
               response_body=$(echo "$response" | sed '/HTTP_CODE:/d')
               
@@ -238,7 +245,10 @@ jobs:
               -F "chat_id=${TG_CHAT_ID}" \
               -F "document=@upload_log.txt" \
               -F "caption=📋 Upload Log" \
-              -F "parse_mode=HTML"
+              -F "parse_mode=HTML" || true
           fi
           
           echo "✅ Workflow completed."
+          
+          # Ensure script exits successfully even if some files were skipped
+          exit 0
