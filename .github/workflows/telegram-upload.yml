@@ -50,10 +50,12 @@ jobs:
           
           RATE_LIMIT_DELAY=2
           UPLOAD_TEMP_DIR="/tmp/telegram_upload_$$"
+          EPUB_EXTRACT_DIR="/tmp/epub_extract_$$"
           MAX_FILE_SIZE=52428800
           MAX_THUMB_SIZE=204800  # 200KB for Telegram thumbnails
           
           mkdir -p "$UPLOAD_TEMP_DIR"
+          mkdir -p "$EPUB_EXTRACT_DIR"
           
           total_files=0
           uploaded_files=0
@@ -72,39 +74,82 @@ jobs:
             printf '%s' "$name" | sed 's/[^a-zA-Z0-9._-]/_/g'
           }
           
-          # Function to find matching cover image for an EPUB
-          find_cover_image() {
+          # Function to find cover image inside EPUB (OEBPS folder)
+          find_cover_in_epub() {
             local epub_path="$1"
-            local epub_dir=$(dirname "$epub_path")
             local epub_name=$(basename "$epub_path" .epub)
+            local extract_dir="${EPUB_EXTRACT_DIR}/epub_${file_counter}"
             
-            # Try multiple possible cover filenames
-            local cover_patterns=(
-              "${epub_name}.jpg"
-              "${epub_name}.jpeg"
-              "${epub_name}.png"
-              "cover.jpg"
-              "cover.jpeg"
-              "cover.png"
-              "${epub_name}_cover.jpg"
-              "folder.jpg"
+            mkdir -p "$extract_dir"
+            
+            # Extract EPUB (it's just a ZIP file)
+            unzip -q -o "$epub_path" -d "$extract_dir" 2>/dev/null
+            if [ $? -ne 0 ]; then
+              echo ""
+              return 1
+            fi
+            
+            # Search for cover images in OEBPS folder and subdirectories
+            local cover_extensions=("jpg" "jpeg" "png")
+            local search_paths=(
+              "OEBPS"
+              "OEBPS/images"
+              "OEBPS/Images"
+              "OEBPS/img"
+              "OEBPS/Img"
+              "OEBPS/media"
+              "OEBPS/Media"
+              "EPUB"
+              "EPUB/images"
+              "."
             )
             
-            for pattern in "${cover_patterns[@]}"; do
-              local cover_path="${epub_dir}/${pattern}"
-              if [ -f "$cover_path" ]; then
-                echo "$cover_path"
+            # Common cover filenames to look for
+            local cover_names=(
+              "cover"
+              "Cover"
+              "COVER"
+              "cover_image"
+              "cover-image"
+              "frontcover"
+              "front-cover"
+              "folder"
+              "${epub_name}"
+            )
+            
+            # Try exact matches first
+            for base_path in "${search_paths[@]}"; do
+              for ext in "${cover_extensions[@]}"; do
+                for name in "${cover_names[@]}"; do
+                  local potential_cover="${extract_dir}/${base_path}/${name}.${ext}"
+                  if [ -f "$potential_cover" ]; then
+                    echo "$potential_cover"
+                    return 0
+                  fi
+                done
+              done
+            done
+            
+            # Fallback: find any image with "cover" in name
+            for base_path in "${search_paths[@]}"; do
+              local found=$(find "$extract_dir/${base_path}" -maxdepth 2 -type f \( -iname "*cover*.jpg" -o -iname "*cover*.jpeg" -o -iname "*cover*.png" \) 2>/dev/null | head -1)
+              if [ -n "$found" ]; then
+                echo "$found"
                 return 0
               fi
             done
             
-            # Also check subdirectories
-            local found_cover=$(find "$epub_dir" -maxdepth 2 -type f \( -iname "cover.jpg" -o -iname "cover.jpeg" -o -iname "folder.jpg" -o -iname "${epub_name}*.jpg" \) | head -1)
-            if [ -n "$found_cover" ]; then
-              echo "$found_cover"
-              return 0
-            fi
+            # Last resort: find any JPG/PNG in OEBPS
+            for base_path in "${search_paths[@]}"; do
+              local found=$(find "$extract_dir/${base_path}" -maxdepth 2 -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) 2>/dev/null | head -1)
+              if [ -n "$found" ]; then
+                echo "$found"
+                return 0
+              fi
+            done
             
+            # No cover found
+            echo ""
             return 1
           }
           
@@ -163,14 +208,14 @@ jobs:
             # Escape HTML for caption
             caption=$(printf '%s' "$filename" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
             
-            # Look for matching cover image
+            # Look for cover image inside EPUB
             cover_image=""
             thumb_file=""
             has_thumbnail=false
             
-            cover_image=$(find_cover_image "$file")
+            cover_image=$(find_cover_in_epub "$file")
             if [ -n "$cover_image" ] && [ -f "$cover_image" ]; then
-              echo "✓ Cover image found: $cover_image"
+              echo "✓ Cover image found inside EPUB: $(basename "$cover_image")"
               thumb_file="${UPLOAD_TEMP_DIR}/thumb_${file_counter}.jpg"
               prepare_thumbnail "$cover_image" "$thumb_file"
               
@@ -186,7 +231,7 @@ jobs:
                 files_without_thumb=$((files_without_thumb + 1))
               fi
             else
-              echo "  → No cover image found"
+              echo "  → No cover image found in EPUB"
               files_without_thumb=$((files_without_thumb + 1))
             fi
             
@@ -342,8 +387,10 @@ jobs:
               skipped_error_files=$((skipped_error_files + 1))
             fi
             
+            # Cleanup
             rm -f "$temp_file"
             rm -f "$thumb_file"
+            rm -rf "${EPUB_EXTRACT_DIR}/epub_${file_counter}"
             
             echo "Waiting ${RATE_LIMIT_DELAY}s..."
             sleep "$RATE_LIMIT_DELAY"
@@ -351,6 +398,7 @@ jobs:
           done < <(find . -type f -iname '*.epub' -not -path '*/\.*' -print0)
           
           rm -rf "$UPLOAD_TEMP_DIR"
+          rm -rf "$EPUB_EXTRACT_DIR"
           
           echo ""
           echo "=========================================="
