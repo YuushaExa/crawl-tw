@@ -52,7 +52,7 @@ jobs:
           UPLOAD_TEMP_DIR="/tmp/telegram_upload_$$"
           EPUB_EXTRACT_DIR="/tmp/epub_extract_$$"
           MAX_FILE_SIZE=52428800
-          MAX_THUMB_SIZE=204800  # 200KB for Telegram thumbnails
+          MAX_THUMB_SIZE=204800
           
           mkdir -p "$UPLOAD_TEMP_DIR"
           mkdir -p "$EPUB_EXTRACT_DIR"
@@ -74,6 +74,13 @@ jobs:
             printf '%s' "$name" | sed 's/[^a-zA-Z0-9._-]/_/g'
           }
           
+          # Function to remove .epub extension for display
+          get_display_name() {
+            local name="$1"
+            # Remove .epub extension (case-insensitive)
+            printf '%s' "$name" | sed 's/\.[eE][pP][uU][bB]$//'
+          }
+          
           # Function to find cover image inside EPUB (OEBPS folder)
           find_cover_in_epub() {
             local epub_path="$1"
@@ -82,14 +89,12 @@ jobs:
             
             mkdir -p "$extract_dir"
             
-            # Extract EPUB (it's just a ZIP file)
             unzip -q -o "$epub_path" -d "$extract_dir" 2>/dev/null
             if [ $? -ne 0 ]; then
               echo ""
               return 1
             fi
             
-            # Search for cover images in OEBPS folder and subdirectories
             local cover_extensions=("jpg" "jpeg" "png")
             local search_paths=(
               "OEBPS"
@@ -104,7 +109,6 @@ jobs:
               "."
             )
             
-            # Common cover filenames to look for
             local cover_names=(
               "cover"
               "Cover"
@@ -117,7 +121,6 @@ jobs:
               "${epub_name}"
             )
             
-            # Try exact matches first
             for base_path in "${search_paths[@]}"; do
               for ext in "${cover_extensions[@]}"; do
                 for name in "${cover_names[@]}"; do
@@ -130,7 +133,6 @@ jobs:
               done
             done
             
-            # Fallback: find any image with "cover" in name
             for base_path in "${search_paths[@]}"; do
               local found=$(find "$extract_dir/${base_path}" -maxdepth 2 -type f \( -iname "*cover*.jpg" -o -iname "*cover*.jpeg" -o -iname "*cover*.png" \) 2>/dev/null | head -1)
               if [ -n "$found" ]; then
@@ -139,7 +141,6 @@ jobs:
               fi
             done
             
-            # Last resort: find any JPG/PNG in OEBPS
             for base_path in "${search_paths[@]}"; do
               local found=$(find "$extract_dir/${base_path}" -maxdepth 2 -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) 2>/dev/null | head -1)
               if [ -n "$found" ]; then
@@ -148,36 +149,31 @@ jobs:
               fi
             done
             
-            # No cover found
             echo ""
             return 1
           }
           
-          # Function to prepare thumbnail (resize if needed)
+          # Function to prepare thumbnail
           prepare_thumbnail() {
             local src="$1"
             local dst="$2"
             
-            # Check if ImageMagick is available
             if ! command -v convert &> /dev/null; then
               cp -- "$src" "$dst"
               return 0
             fi
             
-            # Get image dimensions
             local dimensions=$(identify -format "%wx%h" "$src" 2>/dev/null)
             if [ -z "$dimensions" ]; then
               cp -- "$src" "$dst"
               return 0
             fi
             
-            # Resize if larger than 320x320
             convert "$src" -resize "320x320>" -quality 85 "$dst" 2>/dev/null
             if [ $? -ne 0 ]; then
               cp -- "$src" "$dst"
             fi
             
-            # Check file size, compress if >200KB
             local thumb_size=$(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst" 2>/dev/null)
             if [ "$thumb_size" -gt "$MAX_THUMB_SIZE" ]; then
               convert "$dst" -quality 70 "$dst" 2>/dev/null
@@ -191,22 +187,25 @@ jobs:
             file_counter=$((file_counter + 1))
             filename=$(basename "$file")
             
+            # Get display name (without .epub extension)
+            display_name=$(get_display_name "$filename")
+            
             file_size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
             size_mb=$(awk "BEGIN {printf \"%.2f\", $file_size/1048576}")
             
             echo "=========================================="
-            echo "File: $filename"
+            echo "File: $display_name"
             echo "Size: ${size_mb} MB ($file_size bytes)"
             
             if [ "$file_size" -gt "$MAX_FILE_SIZE" ]; then
-              echo "⚠ SKIPPED (SIZE): $filename exceeds 50MB limit"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (SIZE) - $filename - ${size_mb}MB" >> upload_log.txt
+              echo "⚠ SKIPPED (SIZE): $display_name exceeds 50MB limit"
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (SIZE) - $display_name - ${size_mb}MB" >> upload_log.txt
               skipped_size_files=$((skipped_size_files + 1))
               continue
             fi
             
-            # Escape HTML for caption
-            caption=$(printf '%s' "$filename" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+            # Escape HTML for caption (using display name without .epub)
+            caption=$(printf '%s' "$display_name" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
             
             # Look for cover image inside EPUB
             cover_image=""
@@ -243,14 +242,14 @@ jobs:
             
             if [ $copy_status -ne 0 ]; then
               echo "✗ SKIPPED (COPY ERROR)"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (COPY) - $filename" >> upload_log.txt
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (COPY) - $display_name" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
               continue
             fi
             
             if [ ! -f "$temp_file" ] || [ ! -r "$temp_file" ]; then
               echo "✗ SKIPPED: Temp file not readable"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (NOT READABLE) - $filename" >> upload_log.txt
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (NOT READABLE) - $display_name" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
               continue
             fi
@@ -260,7 +259,7 @@ jobs:
             
             if [ "$temp_size" -eq 0 ]; then
               echo "✗ SKIPPED: Temp file is empty"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (EMPTY) - $filename" >> upload_log.txt
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (EMPTY) - $display_name" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
               rm -f "$temp_file"
               continue
@@ -272,7 +271,7 @@ jobs:
             filename_mode="original"
             
             while [ $retry_count -lt $max_retries ]; do
-              echo "Uploading: $filename (attempt $((retry_count + 1))/$max_retries)"
+              echo "Uploading: $display_name (attempt $((retry_count + 1))/$max_retries)"
               
               if [ "$filename_mode" = "original" ]; then
                 echo "  → Mode: Original filename"
@@ -285,7 +284,6 @@ jobs:
               echo "  → Upload filename: $upload_filename"
               echo "  → Thumbnail: $([ "$has_thumbnail" = true ] && echo 'Yes' || echo 'No')"
               
-              # Build curl command with or without thumbnail
               if [ "$has_thumbnail" = true ]; then
                 response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
                   "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
@@ -327,7 +325,7 @@ jobs:
                   continue
                 else
                   echo "✗ SKIPPED (CURL): Exit $curl_exit_code after $max_retries attempts"
-                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (CURL $curl_exit_code) - $filename" >> upload_log.txt
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (CURL $curl_exit_code) - $display_name" >> upload_log.txt
                   skipped_error_files=$((skipped_error_files + 1))
                   break
                 fi
@@ -341,11 +339,11 @@ jobs:
                 fi
                 
                 if [ "$filename_mode" = "original" ]; then
-                  echo "✓ Success: $filename (original name, ${thumb_status})"
-                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB - Original Name - ${thumb_status}" >> upload_log.txt
+                  echo "✓ Success: $display_name (original name, ${thumb_status})"
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $display_name - ${size_mb}MB - Original Name - ${thumb_status}" >> upload_log.txt
                 else
-                  echo "✓ Success: $filename (sanitized: $upload_filename, ${thumb_status})"
-                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB - Sanitized Name - ${thumb_status}" >> upload_log.txt
+                  echo "✓ Success: $display_name (sanitized: $upload_filename, ${thumb_status})"
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $display_name - ${size_mb}MB - Sanitized Name - ${thumb_status}" >> upload_log.txt
                 fi
                 uploaded_files=$((uploaded_files + 1))
                 upload_success=true
@@ -374,7 +372,7 @@ jobs:
                   continue
                 else
                   echo "✗ SKIPPED (API): After $max_retries attempts"
-                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (API) - $filename" >> upload_log.txt
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (API) - $display_name" >> upload_log.txt
                   skipped_error_files=$((skipped_error_files + 1))
                   break
                 fi
@@ -382,12 +380,11 @@ jobs:
             done
             
             if [ "$upload_success" = false ] && [ $retry_count -ge $max_retries ]; then
-              echo "✗ SKIPPED (MAX RETRIES): $filename"
-              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (RETRIES) - $filename" >> upload_log.txt
+              echo "✗ SKIPPED (MAX RETRIES): $display_name"
+              echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - SKIPPED (RETRIES) - $display_name" >> upload_log.txt
               skipped_error_files=$((skipped_error_files + 1))
             fi
             
-            # Cleanup
             rm -f "$temp_file"
             rm -f "$thumb_file"
             rm -rf "${EPUB_EXTRACT_DIR}/epub_${file_counter}"
