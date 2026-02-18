@@ -15,6 +15,11 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v3
 
+      - name: Install Image Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
       - name: Download ZIP File
         env:
           FILE_URL: ${{ inputs.file_url }}
@@ -37,7 +42,7 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          # CRITICAL: Disable exit-on-error so we can handle curl failures
+          # Disable exit-on-error so we can handle curl failures
           set +e
           set -o pipefail
           
@@ -46,6 +51,7 @@ jobs:
           RATE_LIMIT_DELAY=2
           UPLOAD_TEMP_DIR="/tmp/telegram_upload_$$"
           MAX_FILE_SIZE=52428800
+          MAX_THUMB_SIZE=204800  # 200KB for Telegram thumbnails
           
           mkdir -p "$UPLOAD_TEMP_DIR"
           
@@ -53,10 +59,87 @@ jobs:
           uploaded_files=0
           skipped_size_files=0
           skipped_error_files=0
+          files_with_thumb=0
+          files_without_thumb=0
           file_counter=0
           
           echo "📋 EPUB Upload Log - $(date '+%Y-%m-%d %H:%M:%S')" > upload_log.txt
           echo "==========================================" >> upload_log.txt
+          
+          # Function to sanitize filename (remove/replace special chars)
+          sanitize_filename() {
+            local name="$1"
+            printf '%s' "$name" | sed 's/[^a-zA-Z0-9._-]/_/g'
+          }
+          
+          # Function to find matching cover image for an EPUB
+          find_cover_image() {
+            local epub_path="$1"
+            local epub_dir=$(dirname "$epub_path")
+            local epub_name=$(basename "$epub_path" .epub)
+            
+            # Try multiple possible cover filenames
+            local cover_patterns=(
+              "${epub_name}.jpg"
+              "${epub_name}.jpeg"
+              "${epub_name}.png"
+              "cover.jpg"
+              "cover.jpeg"
+              "cover.png"
+              "${epub_name}_cover.jpg"
+              "folder.jpg"
+            )
+            
+            for pattern in "${cover_patterns[@]}"; do
+              local cover_path="${epub_dir}/${pattern}"
+              if [ -f "$cover_path" ]; then
+                echo "$cover_path"
+                return 0
+              fi
+            done
+            
+            # Also check subdirectories
+            local found_cover=$(find "$epub_dir" -maxdepth 2 -type f \( -iname "cover.jpg" -o -iname "cover.jpeg" -o -iname "folder.jpg" -o -iname "${epub_name}*.jpg" \) | head -1)
+            if [ -n "$found_cover" ]; then
+              echo "$found_cover"
+              return 0
+            fi
+            
+            return 1
+          }
+          
+          # Function to prepare thumbnail (resize if needed)
+          prepare_thumbnail() {
+            local src="$1"
+            local dst="$2"
+            
+            # Check if ImageMagick is available
+            if ! command -v convert &> /dev/null; then
+              cp -- "$src" "$dst"
+              return 0
+            fi
+            
+            # Get image dimensions
+            local dimensions=$(identify -format "%wx%h" "$src" 2>/dev/null)
+            if [ -z "$dimensions" ]; then
+              cp -- "$src" "$dst"
+              return 0
+            fi
+            
+            # Resize if larger than 320x320
+            convert "$src" -resize "320x320>" -quality 85 "$dst" 2>/dev/null
+            if [ $? -ne 0 ]; then
+              cp -- "$src" "$dst"
+            fi
+            
+            # Check file size, compress if >200KB
+            local thumb_size=$(stat -c%s "$dst" 2>/dev/null || stat -f%z "$dst" 2>/dev/null)
+            if [ "$thumb_size" -gt "$MAX_THUMB_SIZE" ]; then
+              convert "$dst" -quality 70 "$dst" 2>/dev/null
+            fi
+            
+            return 0
+          }
           
           while IFS= read -r -d '' file; do
             total_files=$((total_files + 1))
@@ -77,7 +160,35 @@ jobs:
               continue
             fi
             
+            # Escape HTML for caption
             caption=$(printf '%s' "$filename" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+            
+            # Look for matching cover image
+            cover_image=""
+            thumb_file=""
+            has_thumbnail=false
+            
+            cover_image=$(find_cover_image "$file")
+            if [ -n "$cover_image" ] && [ -f "$cover_image" ]; then
+              echo "✓ Cover image found: $cover_image"
+              thumb_file="${UPLOAD_TEMP_DIR}/thumb_${file_counter}.jpg"
+              prepare_thumbnail "$cover_image" "$thumb_file"
+              
+              thumb_size=$(stat -c%s "$thumb_file" 2>/dev/null || stat -f%z "$thumb_file" 2>/dev/null)
+              thumb_size_kb=$((thumb_size / 1024))
+              echo "  Thumbnail size: ${thumb_size_kb}KB"
+              
+              if [ "$thumb_size" -le "$MAX_THUMB_SIZE" ]; then
+                has_thumbnail=true
+                files_with_thumb=$((files_with_thumb + 1))
+              else
+                echo "  ⚠ Thumbnail too large, skipping"
+                files_without_thumb=$((files_without_thumb + 1))
+              fi
+            else
+              echo "  → No cover image found"
+              files_without_thumb=$((files_without_thumb + 1))
+            fi
             
             temp_file="${UPLOAD_TEMP_DIR}/upload_${file_counter}.epub"
             
@@ -113,31 +224,41 @@ jobs:
             max_retries=5
             retry_count=0
             upload_success=false
-            use_original_name=true
+            filename_mode="original"
             
             while [ $retry_count -lt $max_retries ]; do
               echo "Uploading: $filename (attempt $((retry_count + 1))/$max_retries)"
               
-              if [ "$use_original_name" = true ]; then
+              if [ "$filename_mode" = "original" ]; then
                 echo "  → Mode: Original filename"
-                # CRITICAL: Use || true to prevent script exit on curl failure
-                response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-                  "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-                  --form "chat_id=${TG_CHAT_ID}" \
-                  --form "document=@${temp_file};filename=${filename}" \
-                  --form "caption=${caption}" \
-                  --form "parse_mode=HTML" || true)
-                curl_exit_code=${PIPESTATUS[0]}
-              else
-                echo "  → Mode: Fallback (safe mode)"
-                response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-                  "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-                  --form "chat_id=${TG_CHAT_ID}" \
-                  --form "document=@${temp_file}" \
-                  --form "caption=${caption}" \
-                  --form "parse_mode=HTML" || true)
-                curl_exit_code=${PIPESTATUS[0]}
+                upload_filename="$filename"
+              elif [ "$filename_mode" = "sanitized" ]; then
+                echo "  → Mode: Sanitized filename"
+                upload_filename=$(sanitize_filename "$filename")
               fi
+              
+              echo "  → Upload filename: $upload_filename"
+              echo "  → Thumbnail: $([ "$has_thumbnail" = true ] && echo 'Yes' || echo 'No')"
+              
+              # Build curl command with or without thumbnail
+              if [ "$has_thumbnail" = true ]; then
+                response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+                  "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+                  --form "chat_id=${TG_CHAT_ID}" \
+                  --form "document=@${temp_file};filename=${upload_filename}" \
+                  --form "thumb=@${thumb_file}" \
+                  --form "caption=${caption}" \
+                  --form "parse_mode=HTML" || true)
+              else
+                response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+                  "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+                  --form "chat_id=${TG_CHAT_ID}" \
+                  --form "document=@${temp_file};filename=${upload_filename}" \
+                  --form "caption=${caption}" \
+                  --form "parse_mode=HTML" || true)
+              fi
+              
+              curl_exit_code=${PIPESTATUS[0]}
               
               http_code=$(echo "$response" | grep "HTTP_CODE:" | cut -d':' -f2)
               response_body=$(echo "$response" | sed '/HTTP_CODE:/d')
@@ -147,10 +268,9 @@ jobs:
               if [ $curl_exit_code -ne 0 ]; then
                 echo "  ⚠ curl failed: exit code $curl_exit_code"
                 
-                # If using original name and got error 26, switch to fallback mode
-                if [ "$use_original_name" = true ] && [ $curl_exit_code -eq 26 ]; then
-                  echo "  → Switching to fallback mode (safe filename)..."
-                  use_original_name=false
+                if [ "$filename_mode" = "original" ] && [ $curl_exit_code -eq 26 ]; then
+                  echo "  → Switching to sanitized filename mode..."
+                  filename_mode="sanitized"
                   retry_count=$((retry_count + 1))
                   continue
                 fi
@@ -169,12 +289,18 @@ jobs:
               fi
               
               if echo "$response_body" | grep -q '"ok":true'; then
-                if [ "$use_original_name" = true ]; then
-                  echo "✓ Success: $filename (original name)"
-                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB - Original Name" >> upload_log.txt
+                if [ "$has_thumbnail" = true ]; then
+                  thumb_status="With Thumbnail"
                 else
-                  echo "✓ Success: $filename (fallback mode)"
-                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB - Fallback Name" >> upload_log.txt
+                  thumb_status="No Thumbnail"
+                fi
+                
+                if [ "$filename_mode" = "original" ]; then
+                  echo "✓ Success: $filename (original name, ${thumb_status})"
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB - Original Name - ${thumb_status}" >> upload_log.txt
+                else
+                  echo "✓ Success: $filename (sanitized: $upload_filename, ${thumb_status})"
+                  echo "📝 $(date '+%Y-%m-%d %H:%M:%S') - UPLOADED - $filename - ${size_mb}MB - Sanitized Name - ${thumb_status}" >> upload_log.txt
                 fi
                 uploaded_files=$((uploaded_files + 1))
                 upload_success=true
@@ -189,10 +315,9 @@ jobs:
                 echo "✗ API error:"
                 echo "$response_body"
                 
-                # If using original name and API error, try fallback mode
-                if [ "$use_original_name" = true ]; then
-                  echo "  → Switching to fallback mode (safe filename)..."
-                  use_original_name=false
+                if [ "$filename_mode" = "original" ]; then
+                  echo "  → Switching to sanitized filename mode..."
+                  filename_mode="sanitized"
                   retry_count=$((retry_count + 1))
                   continue
                 fi
@@ -218,6 +343,7 @@ jobs:
             fi
             
             rm -f "$temp_file"
+            rm -f "$thumb_file"
             
             echo "Waiting ${RATE_LIMIT_DELAY}s..."
             sleep "$RATE_LIMIT_DELAY"
@@ -232,12 +358,14 @@ jobs:
           echo "=========================================="
           echo "Total: $total_files"
           echo "✓ Uploaded: $uploaded_files"
+          echo "  - With Thumbnail: $files_with_thumb"
+          echo "  - Without Thumbnail: $files_without_thumb"
           echo "⚠ Skipped (Size): $skipped_size_files"
           echo "⚠ Skipped (Errors): $skipped_error_files"
           echo "=========================================="
           
           echo "" >> upload_log.txt
-          echo "SUMMARY: Total=$total_files, Uploaded=$uploaded_files, Skipped_Size=$skipped_size_files, Skipped_Errors=$skipped_error_files" >> upload_log.txt
+          echo "SUMMARY: Total=$total_files, Uploaded=$uploaded_files, With_Thumb=$files_with_thumb, Without_Thumb=$files_without_thumb, Skipped_Size=$skipped_size_files, Skipped_Errors=$skipped_error_files" >> upload_log.txt
           
           if [ "$skipped_size_files" -gt 0 ] || [ "$skipped_error_files" -gt 0 ]; then
             echo "📎 Uploading log to Telegram..."
@@ -249,6 +377,4 @@ jobs:
           fi
           
           echo "✅ Workflow completed."
-          
-          # Ensure script exits successfully even if some files were skipped
           exit 0
