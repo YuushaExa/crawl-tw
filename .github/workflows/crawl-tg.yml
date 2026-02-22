@@ -6,6 +6,7 @@ on:
       url:
         description: 'URL to crawl'
         required: true
+        type: string
 
 jobs:
   crawl-and-send:
@@ -14,9 +15,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      # We only need the code to run the script, no history needed
       with:
-        fetch-depth: 1 
+        fetch-depth: 1
         
     - name: Clear results folder (optional cleanup)
       run: rm -rf results-tg || true
@@ -25,9 +25,14 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: '20'
+        cache: 'npm'  # Optional: cache dependencies for faster runs
         
     - name: Install dependencies
       run: npm install
+      
+    - name: Install required tools (jq + ImageMagick)
+      run: |
+        sudo apt-get update && sudo apt-get install -y jq imagemagick
       
     - name: Run crawler
       run: node script/script-tg.js "${{ github.event.inputs.url }}"
@@ -37,24 +42,97 @@ jobs:
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: |
-        # Find the generated zip file
+        # ─────────────────────────────────────────────────────────────
+        # 1️⃣ Find the generated ZIP file
+        # ─────────────────────────────────────────────────────────────
         FILE_PATH=$(find results-tg -name "*.zip" -type f | head -n 1)
-
         if [ -z "$FILE_PATH" ]; then
           echo "::error::No .zip file found in results-tg. Did the crawler fail?"
           exit 1
         fi
-
         echo "✅ Found file: $FILE_PATH"
         FILE_NAME=$(basename "$FILE_PATH")
-        INPUT_URL="${{ github.event.inputs.url }}"
 
-        # Send to Telegram
-        echo "🚀 Uploading to Telegram channel..."
-        curl -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-          -F "chat_id=${TG_CHAT_ID}" \
-          -F "document=@${FILE_PATH}" \
-          -F "caption=📚 ${FILE_NAME}" \
-          -F "parse_mode=HTML"
+        # ─────────────────────────────────────────────────────────────
+        # 2️⃣ Extract cover image from result JSON
+        # ─────────────────────────────────────────────────────────────
+        JSON_FILE=$(find results-tg -name "*.json" -type f | head -n 1)
+        THUMB_PATH=""
+        
+        if [ -n "$JSON_FILE" ] && [ -f "$JSON_FILE" ]; then
+          # 🔧 ADJUST THIS SELECTOR to match your JSON structure:
+          # Examples:
+          #   '.cover'                    → top-level "cover" field
+          #   '.metadata.coverImage'      → nested field
+          #   '.novel.thumbnail // .cover' → fallback chain
+          COVER=$(jq -r '.cover // .thumbnail // .image // .coverImage // empty' "$JSON_FILE" 2>/dev/null)
+          
+          if [ -n "$COVER" ] && [ "$COVER" != "null" ]; then
+            echo "🖼️ Found cover reference: $COVER"
+            
+            if [[ "$COVER" =~ ^https?:// ]]; then
+              # 🌐 Remote URL: download to temp
+              echo "⬇️ Downloading remote cover..."
+              THUMB_PATH="/tmp/thumb_source.jpg"
+              curl -L -s --max-time 30 -o "$THUMB_PATH" "$COVER" || THUMB_PATH=""
+              
+            elif [ -f "$COVER" ]; then
+              # 📁 Absolute local path
+              THUMB_PATH="$COVER"
+              
+            elif [ -f "results-tg/$COVER" ]; then
+              # 📂 Relative path inside results folder
+              THUMB_PATH="results-tg/$COVER"
+            fi
+            
+            # 🎨 Optimize thumbnail for Telegram requirements:
+            # • Format: JPG • Size: <200KB • Dimensions: ≤320x320px
+            if [ -n "$THUMB_PATH" ] && [ -f "$THUMB_PATH" ]; then
+              OPTIMIZED="/tmp/thumb.jpg"
+              
+              # Convert to JPG, resize, compress
+              convert "$THUMB_PATH" -strip -resize '320x320>' -quality 85 "$OPTIMIZED" 2>/dev/null
+              
+              # Verify size < 200KB (204800 bytes)
+              if [ -f "$OPTIMIZED" ]; then
+                FILE_SIZE=$(stat -c%s "$OPTIMIZED" 2>/dev/null || stat -f%z "$OPTIMIZED" 2>/dev/null || echo 999999)
+                if [ "$FILE_SIZE" -lt 204800 ]; then
+                  THUMB_PATH="$OPTIMIZED"
+                  echo "✅ Thumbnail optimized (${FILE_SIZE} bytes)"
+                else
+                  echo "⚠️ Optimized thumb still too large (${FILE_SIZE} bytes), skipping thumbnail"
+                  THUMB_PATH=""
+                fi
+              fi
+            fi
+          fi
+        fi
 
-        echo "✅ Upload successful!"
+        # ─────────────────────────────────────────────────────────────
+        # 3️⃣ Send to Telegram with optional thumbnail
+        # ─────────────────────────────────────────────────────────────
+        echo "🚀 Uploading to Telegram..."
+        
+        # Build curl command dynamically
+        if [ -n "$THUMB_PATH" ] && [ -f "$THUMB_PATH" ]; then
+          curl -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+            -F "chat_id=${TG_CHAT_ID}" \
+            -F "document=@${FILE_PATH}" \
+            -F "thumb=@${THUMB_PATH}" \
+            -F "caption=📚 <b>${FILE_NAME}</b>" \
+            -F "parse_mode=HTML"
+        else
+          echo "⚠️ No valid thumbnail found, uploading without preview"
+          curl -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+            -F "chat_id=${TG_CHAT_ID}" \
+            -F "document=@${FILE_PATH}" \
+            -F "caption=📚 <b>${FILE_NAME}</b>" \
+            -F "parse_mode=HTML"
+        fi
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ Upload successful!"
+        else
+          echo "::error::Telegram upload failed"
+          exit 1
+        fi
